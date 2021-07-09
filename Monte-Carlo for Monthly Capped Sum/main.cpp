@@ -124,12 +124,13 @@ Decimal ValueEstimateOnThrustAlt    (   size_t ScenariosCount
     thrust::counting_iterator<size_t> last (ScenariosCount); 
 
     thrust::transform (first, last, scenarios.begin (),
-                            [assumptions, market, norms = norm_rand.data ()] (size_t scenario_index)
+                            [ScenariosCount, assumptions, market, norms = norm_rand.data ()] (size_t scenario_index)
                             {
                                 auto offset = scenario_index * assumptions.term_months;
                                 auto prod = 1.0;
-                                for (auto n = norms + offset; n < norms + offset + assumptions.term_months; ++n)
+                                for (auto i = 0; i < assumptions.term_months; ++i)
                                 {
+                                    auto n = norms + scenario_index + i * ScenariosCount;
                                     prod *= (thrust::min (std::exp(*n) - 1, market.get_cap_rate ()) + 1.0);
                                 }
                                 return thrust::max (prod, 1.0) * std::exp((-assumptions.term_months / 12.0) * market.get_annual_interest ());
@@ -156,7 +157,7 @@ Decimal ValueEstimateOnThrust   (   size_t ScenariosCount
 
     thrust::transform (scenarios.begin (), scenarios.end (), scenarios.begin (),
                         [market, assumptions](auto rate)
-                        {return thrust::max (1.0, rate) * thrust::exp(thrust::complex<Decimal>((-assumptions.term_months / 12.0) * market.get_annual_interest ())).real ();});
+                        {return thrust::max (1.0, rate) * std::exp((-assumptions.term_months / 12.0) * market.get_annual_interest ());});
 
     return thrust::reduce (scenarios.begin (), scenarios.end (), 0.0, thrust::plus<Decimal> {}) / ScenariosCount;
 }
