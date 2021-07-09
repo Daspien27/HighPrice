@@ -67,7 +67,6 @@ public:
 
 struct Assumptions {
     int term_months;
-    Decimal index;
 };
 
 std::vector<Decimal> allocate_vec_w_reserve(size_t length)
