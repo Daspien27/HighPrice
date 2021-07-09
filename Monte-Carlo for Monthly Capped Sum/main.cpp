@@ -5,12 +5,14 @@
 #include <utility>
 #include <iterator>
 #include <iostream>
-//#include <execution>
 
-//#include <boost/math/distributions/normal.hpp>
+#include "nanobench.h"
+
 #include <thrust/transform.h>
 #include <thrust/random/normal_distribution.h>
 #include <thrust/scan.h>
+#include <thrust/functional.h>
+#include <thrust/complex.h>
 #include <thrust/functional.h>
 
 using Decimal = double;
@@ -85,80 +87,91 @@ Decimal growth_rate(Decimal x, Decimal mean, Decimal stddev) {
 struct get_random
 {
     get_random (MarketData const & market)
-    : rd {}
+    : nrg {std::random_device () ()}
     , nd {market.get_monthly_interest(), market.get_monthly_vol()}
     {}
 
     std::random_device rd;
+    std::mt19937_64 nrg;
     std::normal_distribution<Decimal> nd;
 
     Decimal operator () ()
     {
-        return nd(rd);
+        return nd(nrg);
     }
 };
 
+std::vector<Decimal> RandomRates (size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions)
+{
+    std::vector<Decimal> norm_rand;
+    norm_rand.reserve (assumptions.term_months * ScenariosCount);
+
+    std::generate_n(std::back_inserter(norm_rand), assumptions.term_months * ScenariosCount, get_random (market));
+
+    return norm_rand;
+}
+
+Decimal ValueEstimateOnThrust (size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions, thrust::device_vector<Decimal> const & norm_rand)
+{
+    thrust::device_vector<Decimal> scenarios (ScenariosCount, 1.0);
+    for (auto i = 0; i < assumptions.term_months; ++i)
+    {
+        thrust::transform (scenarios.begin (), scenarios.end (), norm_rand.begin () + i * ScenariosCount, scenarios.begin (),
+                            [market] (Decimal scenario, Decimal rate)
+                            {
+                                return scenario * (thrust::min (rate - 1, market.get_cap_rate ()) + 1.0);
+                            });
+    }
+
+    thrust::transform (scenarios.begin (), scenarios.end (), scenarios.begin (),
+                        [market](auto rate)
+                        {return thrust::max (1.0, rate) * thrust::exp(thrust::complex<Decimal>(-3.0 * market.get_annual_interest ())).real ();});
+    
+    return thrust::reduce (scenarios.begin (), scenarios.end (), 0.0, thrust::plus<Decimal> {}) / ScenariosCount;
+}
+
+
+Decimal ValueEstimateOnHost (size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions, std::vector<Decimal> const & norm_rand)
+{
+    std::vector<Decimal> scenarios (ScenariosCount, 1.0);
+
+    for (auto i = 0; i < assumptions.term_months; ++i)
+    {
+        std::transform (scenarios.begin (), scenarios.end (), norm_rand.begin () + i * ScenariosCount, scenarios.begin (),
+                            [market] (Decimal scenario, Decimal rate)
+                            {
+                                return scenario * (std::min (rate - 1, market.get_cap_rate ()) + 1.0);
+                            });
+    }
+
+    std::transform (scenarios.begin (), scenarios.end (), scenarios.begin (),
+                        [market](auto rate) {return std::max (1.0, rate)* std::exp(-3.0 * market.get_annual_interest());});
+    
+    return std::reduce (scenarios.begin (), scenarios.end (), 0.0, std::plus<Decimal> {}) / ScenariosCount;
+}
+
+
 int main(int argc, char * argv[])
 {
-    const size_t ScenariosCount = 1000;
+    ankerl::nanobench::Bench b;
+    b.title("Vectors comparison");
+    b.minEpochIterations(std::stoi(argv[2]));
+
+    const size_t ScenariosCount = std::stoi (argv[1]);
+
     const MarketData market{ 0.05, 0.1, 1.0 / 12.0, 0.05 };
     const Assumptions assumptions = { 3 * 12, 1000.0 };
 
-    auto new_vec = [&]() {
-        return allocate_vec_w_reserve(assumptions.term_months);
-    };
-
-    std::vector<Decimal> norm_rand = new_vec();
-
-    std::generate_n(std::back_inserter(norm_rand), assumptions.term_months, get_random (market));
-
+    auto norm_rand = RandomRates (ScenariosCount, market, assumptions);
     thrust::device_vector<Decimal> norm_rand_device (norm_rand.size ());
     thrust::copy (norm_rand.begin (), norm_rand.end (), norm_rand_device.begin ());
 
-    thrust::device_vector<Decimal> growth_rate_vec (norm_rand_device.size ());
-    thrust::transform(norm_rand_device.begin(), norm_rand_device.end(), growth_rate_vec.begin (), [market](Decimal x) {
-        return growth_rate(x, market.get_monthly_interest(), market.get_monthly_vol());
-        });
+    Decimal avgThrust, avgSTL;
 
-    //thrust::device_vector<Decimal> index (growth_rate_vec.size ());
-    //thrust::inclusive_scan(growth_rate_vec.begin(), growth_rate_vec.end(), index.begin (), std::multiplies<Decimal>{}, assumptions.index);
+    b.run("device", [&] () {avgThrust = ValueEstimateOnThrust (ScenariosCount, market, assumptions, norm_rand_device);});
+    b.run("host",   [&] () {avgSTL = ValueEstimateOnHost (ScenariosCount, market, assumptions, norm_rand);});
 
-    //thrust::device_vector<Decimal> pct_growth (growth_rate_vec.size ());
-    //thrust::transform(growth_rate_vec.begin(), growth_rate_vec.end(), pct_growth.begin (), [](Decimal x) { return x - 1; });
-
-    //thrust::device_vector<Decimal> capped_g (pct_growth.size ());
-    //thrust::transform(pct_growth.begin(), pct_growth.end(), capped_g.begin (), [market](Decimal x) { return thrust::min(x, market.get_cap_rate()); });
-
-    //thrust::device_vector<Decimal> one_plus_capped_g (capped_g.size ());
-    //thrust::transform(capped_g.begin(), capped_g.end(), one_plus_capped_g.begin (), [](Decimal x) { return x + 1; });
-
-    thrust::device_vector<Decimal> one_plus_capped_g (growth_rate_vec.size ());
-    thrust::transform(  growth_rate_vec.begin(), growth_rate_vec.end(), one_plus_capped_g.begin (),
-                        [market](Decimal x)
-                        {
-                            return thrust::min (x - 1, market.get_cap_rate ()) + 1; 
-                        });
-
-    Decimal pi_one_plus_capped_g = thrust::reduce(one_plus_capped_g.begin(), one_plus_capped_g.end(), 1.0, thrust::multiplies<Decimal>{});
-    Decimal monthly_cap_sum_payoff = std::max(1.0, pi_one_plus_capped_g);
-    Decimal present_value_of_cash_flow = monthly_cap_sum_payoff * std::exp(-3.0 * market.get_annual_interest());
-
-
-    std::cout << present_value_of_cash_flow << std::endl;
-
-    // reduce(all present values) / num(all present values)
-
-  //  0,1,2,3,.....,10000
-  //      ->
-  // //pvs
-  //      [](auto i) {
-  //      
-  //      // generate i * assumptions.term_months
-  //      // get normal dists
-  //      // ???
-  //      // profit
-  //      //return pv
-  //  }
+    std::cout << "Device result:\t\t" << avgThrust << std::endl << "Host result:\t\t" << avgSTL << std::endl;
 
     return 0;
 }
