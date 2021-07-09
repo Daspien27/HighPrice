@@ -87,16 +87,17 @@ Decimal growth_rate(Decimal x, Decimal mean, Decimal stddev) {
 struct get_random
 {
     get_random (MarketData const & market)
-    : rd {}
+    : nrg {std::random_device () ()}
     , nd {market.get_monthly_interest(), market.get_monthly_vol()}
     {}
 
     std::random_device rd;
+    std::mt19937_64 nrg;
     std::normal_distribution<Decimal> nd;
 
     Decimal operator () ()
     {
-        return nd(rd);
+        return nd(nrg);
     }
 };
 
