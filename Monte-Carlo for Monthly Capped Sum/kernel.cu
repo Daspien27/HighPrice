@@ -16,6 +16,8 @@
 #include <thrust/functional.h>
 #include <iostream>
 
+using Decimal = double;
+
 void generate_STL(const int num_scenarios, const int term_months, int mean, int stddev)
 {
 	std::ofstream f;
@@ -31,7 +33,7 @@ void generate_STL(const int num_scenarios, const int term_months, int mean, int 
 
 		for (int t = 0; t < term_months; ++t)
 		{
-			std::normal_distribution<double> nd1(mean, stddev);
+			std::normal_distribution<Decimal> nd1(mean, stddev);
 
 			f << nd1(gen) << "\n";
 		}
@@ -43,16 +45,16 @@ void generate_STL(const int num_scenarios, const int term_months, int mean, int 
 }
 
 struct rd_thrust {
-	double interest;
-	double volatility;
-	unsigned int seed;
+	const double interest;
+	const double volatility;
+	const unsigned int seed;
 	const unsigned int term_months;
 
 	__host__ __device__
 		rd_thrust(double i, double v, unsigned int s, unsigned int t) : interest(i), volatility(v), seed(s), term_months(t) {}
 
 	__host__ __device__
-		double operator() (const unsigned int n) {
+		double operator() (const unsigned int n) const {
 		thrust::default_random_engine rng(seed);
 		thrust::normal_distribution<double> dist(0, 1);
 		rng.discard(n * term_months);
@@ -88,26 +90,31 @@ struct my_plus
 	}
 }; // end plus
 
+
+thrust::device_vector<Decimal> device_generate_normrands(const int num_scenarios, const inst term_months, const Decimal interest, const Decimal volatility)
+{
+	const unsigned int effective_duration_in_months = num_scenarios * term_months;
+
+	thrust::counting_iterator<unsigned int> index_sequence_begin(0);
+	thrust::device_vector<Decimal> result(effective_duration_in_months);
+	std::random_device rd;
+
+	thrust::transform(index_sequence_begin, index_sequence_begin + effective_duration_in_months, result.begin(), rd_thrust{ interest, volatility,  rd(), term_months });
+
+	return result;
+}
+
 int main() {
 
 	const int num_scenarios = 500;
-
 	const int term_months = 100;
-
 	auto interest = 0.5;
 	auto vol = 1.0;
 
 	std::ofstream g;
 	g.open("thrust_norm scenarios");
 
-	thrust::counting_iterator<unsigned int> index_sequence_begin(0);
-
-	const unsigned int effective_duration_in_months = num_scenarios * term_months;
-
-	thrust::device_vector<double> random_datapoints_for_all_scenarios(effective_duration_in_months);
-	std::random_device rd;
-
-	thrust::transform(index_sequence_begin, index_sequence_begin + effective_duration_in_months, random_datapoints_for_all_scenarios.begin(), rd_thrust{ interest, vol,  rd(), term_months });
+	thrust::device_vector<Decimal> random_datapoints_for_all_scenarios = device_generate_normrands(num_scenarios, term_months, interest, vol);
 
 	thrust::copy(random_datapoints_for_all_scenarios.begin(), random_datapoints_for_all_scenarios.end(), std::ostream_iterator<double>(g, "\n"));
 
