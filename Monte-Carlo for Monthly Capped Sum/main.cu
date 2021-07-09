@@ -126,7 +126,7 @@ Decimal ValueEstimateOnThrustAlt    (   size_t ScenariosCount
     thrust::counting_iterator<size_t> last (ScenariosCount); 
 
     thrust::transform (first, last, scenarios.begin (),
-                            [assumptions, market, norms = norm_rand.data ()] (size_t scenario_index)
+                            [assumptions, market, norms = norm_rand.data ()] __device__ (size_t scenario_index)
                             {
                                 auto offset = scenario_index * assumptions.term_months;
                                 auto prod = 1.0;
