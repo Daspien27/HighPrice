@@ -16,6 +16,7 @@
 #include <thrust/functional.h>
 #include <thrust/complex.h>
 #include <thrust/functional.h>
+#include <thrust/random.h>
 
 using Decimal = double;
 
@@ -91,7 +92,7 @@ struct get_random
     __host__
     get_random (MarketData const & market)
     : nrg {std::random_device () ()}
-    , nd {market.get_monthly_interest(), market.get_monthly_vol()}
+    , nd {market.get_monthly_interest() - market.get_monthly_vol() * market.get_monthly_vol() / 2.0, market.get_monthly_vol()}
     {}
 
     std::random_device rd;
@@ -114,7 +115,36 @@ std::vector<Decimal> RandomRates (size_t ScenariosCount, const MarketData & mark
     return norm_rand;
 }
 
-Decimal ValueEstimateOnThrust (size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions, thrust::device_vector<Decimal> const & norm_rand)
+
+Decimal ValueEstimateOnThrustAlt    (   size_t ScenariosCount
+                                    ,   const MarketData & market
+                                    ,   const Assumptions & assumptions
+                                    ,   thrust::device_vector<Decimal> const & norm_rand)
+{
+    thrust::device_vector<Decimal> scenarios (ScenariosCount, 1.0);
+    thrust::counting_iterator<size_t> first (0);
+    thrust::counting_iterator<size_t> last (ScenariosCount); 
+
+    thrust::transform (first, last, scenarios.begin (),
+                            [assumptions, market, norms = norm_rand.data ()] (size_t scenario_index)
+                            {
+                                auto offset = scenario_index * assumptions.term_months;
+                                auto prod = 1.0;
+                                for (auto n = norms + offset; n < norms + offset + assumptions.term_months; ++n)
+                                {
+                                    prod *= (thrust::min (std::exp(*n) - 1, market.get_cap_rate ()) + 1.0);
+                                }
+                                return thrust::max (prod, 1.0) * std::exp((-assumptions.term_months / 12.0) * market.get_annual_interest ());
+                            });
+    
+    return thrust::reduce (scenarios.begin (), scenarios.end (), 0.0, thrust::plus<Decimal> {}) / ScenariosCount;
+}
+
+
+Decimal ValueEstimateOnThrust   (   size_t ScenariosCount
+                                ,   const MarketData & market
+                                ,   const Assumptions & assumptions
+                                ,   thrust::device_vector<Decimal> const & norm_rand)
 {
     thrust::device_vector<Decimal> scenarios (ScenariosCount, 1.0);
     for (auto i = 0; i < assumptions.term_months; ++i)
@@ -122,19 +152,22 @@ Decimal ValueEstimateOnThrust (size_t ScenariosCount, const MarketData & market,
         thrust::transform (scenarios.begin (), scenarios.end (), norm_rand.begin () + i * ScenariosCount, scenarios.begin (),
                             [market] __device__ (Decimal scenario, Decimal rate)
                             {
-                                return scenario * (thrust::min (rate - 1, market.get_cap_rate ()) + 1.0);
+                                return scenario * (thrust::min (std::exp(rate) - 1, market.get_cap_rate ()) + 1.0);
                             });
     }
 
     thrust::transform (scenarios.begin (), scenarios.end (), scenarios.begin (),
-                        [market] __device__ (auto rate)
-                        {return thrust::max (1.0, rate) * thrust::exp(thrust::complex<Decimal>(-3.0 * market.get_annual_interest ())).real ();});
-    
+                        [market, assumptions] __device__ (auto rate)
+                        {return thrust::max (1.0, rate) * thrust::exp(thrust::complex<Decimal>((-assumptions.term_months / 12.0) * market.get_annual_interest ())).real ();});
+
     return thrust::reduce (scenarios.begin (), scenarios.end (), 0.0, thrust::plus<Decimal> {}) / ScenariosCount;
 }
 
 
-Decimal ValueEstimateOnHost (size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions, std::vector<Decimal> const & norm_rand)
+Decimal ValueEstimateOnHost (   size_t ScenariosCount
+                            ,   const MarketData & market
+                            ,   const Assumptions & assumptions
+                            ,   std::vector<Decimal> const & norm_rand)
 {
     std::vector<Decimal> scenarios (ScenariosCount, 1.0);
 
@@ -143,16 +176,51 @@ Decimal ValueEstimateOnHost (size_t ScenariosCount, const MarketData & market, c
         std::transform (scenarios.begin (), scenarios.end (), norm_rand.begin () + i * ScenariosCount, scenarios.begin (),
                             [market] (Decimal scenario, Decimal rate)
                             {
-                                return scenario * (std::min (rate - 1, market.get_cap_rate ()) + 1.0);
+                                return scenario * (std::min (std::exp(rate) - 1, market.get_cap_rate ()) + 1.0);
                             });
     }
 
     std::transform (scenarios.begin (), scenarios.end (), scenarios.begin (),
-                        [market](auto rate) {return std::max (1.0, rate)* std::exp(-3.0 * market.get_annual_interest());});
-    
+                        [market, assumptions](auto rate) {return std::max (1.0, rate)* std::exp((-assumptions.term_months / 12.0) * market.get_annual_interest());});
+
     return std::reduce (scenarios.begin (), scenarios.end (), 0.0, std::plus<Decimal> {}) / ScenariosCount;
 }
 
+namespace random_device_generator
+{
+
+struct rd_thrust {
+	const double interest;
+	const double volatility;
+	const unsigned int seed;
+	const int term_months;
+
+	__host__ __device__
+		rd_thrust(double i, double v, unsigned int s, int t) : interest(i), volatility(v), seed(s), term_months(t) {}
+
+	__host__ __device__
+		double operator() (const unsigned int n) const {
+		thrust::default_random_engine rng(seed);
+		thrust::normal_distribution<double> dist(interest - volatility * volatility / 2.0, volatility);
+		rng.discard(n * term_months);
+		return dist(rng);
+	}
+};
+
+thrust::device_vector<Decimal> device_generate_normrands(const size_t num_scenarios, const int term_months, const Decimal interest, const Decimal volatility)
+{
+	const unsigned int effective_duration_in_months = num_scenarios * term_months;
+
+	thrust::counting_iterator<unsigned int> index_sequence_begin(0);
+	thrust::device_vector<Decimal> result(effective_duration_in_months);
+	std::random_device rd;
+
+	thrust::transform(index_sequence_begin, index_sequence_begin + effective_duration_in_months, result.begin(), rd_thrust{ interest, volatility,  rd(), term_months });
+
+	return result;
+}
+
+}
 
 int main(int argc, char * argv[])
 {
@@ -165,16 +233,18 @@ int main(int argc, char * argv[])
     const MarketData market{ 0.05, 0.1, 1.0 / 12.0, 0.05 };
     const Assumptions assumptions = { 3 * 12, 1000.0 };
 
-    auto norm_rand = RandomRates (ScenariosCount, market, assumptions); 
-    thrust::device_vector<Decimal> norm_rand_device (norm_rand.size ());
-    thrust::copy (norm_rand.begin (), norm_rand.end (), norm_rand_device.begin ());
+    std::vector<Decimal> norm_rand;
+    b.run ("rng host",  [&] () {norm_rand = RandomRates (ScenariosCount, market, assumptions);});
+    thrust::device_vector<Decimal> norm_rand_device;
+    b.run ("rng device",    [&] () {norm_rand_device = random_device_generator::device_generate_normrands (ScenariosCount, assumptions.term_months, market.get_monthly_interest (), market.get_monthly_vol ());});
 
-    Decimal avgThrust, avgSTL;
+    Decimal avgThrustAlt, avgThrust, avgSTL;
 
-    b.run("device", [&] () {avgThrust = ValueEstimateOnThrust (ScenariosCount, market, assumptions, norm_rand_device);});
-    b.run("host",   [&] () {avgSTL = ValueEstimateOnHost (ScenariosCount, market, assumptions, norm_rand);});
+    b.run("device alt", [&] () {avgThrustAlt = ValueEstimateOnThrustAlt (ScenariosCount, market, assumptions, norm_rand_device);});
+    b.run("device",     [&] () {avgThrust = ValueEstimateOnThrust (ScenariosCount, market, assumptions, norm_rand_device);});
+    b.run("host",       [&] () {avgSTL = ValueEstimateOnHost (ScenariosCount, market, assumptions, norm_rand);});
 
-    std::cout << "Device result:\t\t" << avgThrust << std::endl << "Host result:\t\t" << avgSTL << std::endl;
+    std::cout << "Device result alt:\t" << avgThrustAlt << '\n' << "Device result:\t\t" << avgThrust << std::endl << "Host result:\t\t" << avgSTL << std::endl;
 
     return 0;
 }
