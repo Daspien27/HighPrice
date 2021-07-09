@@ -77,11 +77,6 @@ std::vector<Decimal> allocate_vec_w_reserve(size_t length)
     return v;
 }
 
-//Decimal norm_inv(Decimal x, Decimal mean, Decimal stddev) {
-//    boost::math::normal n(mean, stddev);
-//    return boost::math::quantile(n, x);
-//}
-
 __host__ __device__
 Decimal growth_rate(Decimal x, Decimal mean, Decimal stddev) {
     return std::exp((mean - 0.5 * stddev * stddev) + stddev * x);
