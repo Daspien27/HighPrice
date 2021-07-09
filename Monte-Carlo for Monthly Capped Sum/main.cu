@@ -6,8 +6,10 @@
 #include <iterator>
 #include <iostream>
 
+#define ANKERL_NANOBENCH_IMPLEMENT
 #include "nanobench.h"
 
+#include <thrust/device_vector.h>
 #include <thrust/transform.h>
 #include <thrust/random/normal_distribution.h>
 #include <thrust/scan.h>
@@ -86,6 +88,7 @@ Decimal growth_rate(Decimal x, Decimal mean, Decimal stddev) {
 
 struct get_random
 {
+    __host__
     get_random (MarketData const & market)
     : nrg {std::random_device () ()}
     , nd {market.get_monthly_interest(), market.get_monthly_vol()}
@@ -117,14 +120,14 @@ Decimal ValueEstimateOnThrust (size_t ScenariosCount, const MarketData & market,
     for (auto i = 0; i < assumptions.term_months; ++i)
     {
         thrust::transform (scenarios.begin (), scenarios.end (), norm_rand.begin () + i * ScenariosCount, scenarios.begin (),
-                            [market] (Decimal scenario, Decimal rate)
+                            [market] __device__ (Decimal scenario, Decimal rate)
                             {
                                 return scenario * (thrust::min (rate - 1, market.get_cap_rate ()) + 1.0);
                             });
     }
 
     thrust::transform (scenarios.begin (), scenarios.end (), scenarios.begin (),
-                        [market](auto rate)
+                        [market] __device__ (auto rate)
                         {return thrust::max (1.0, rate) * thrust::exp(thrust::complex<Decimal>(-3.0 * market.get_annual_interest ())).real ();});
     
     return thrust::reduce (scenarios.begin (), scenarios.end (), 0.0, thrust::plus<Decimal> {}) / ScenariosCount;
@@ -162,7 +165,7 @@ int main(int argc, char * argv[])
     const MarketData market{ 0.05, 0.1, 1.0 / 12.0, 0.05 };
     const Assumptions assumptions = { 3 * 12, 1000.0 };
 
-    auto norm_rand = RandomRates (ScenariosCount, market, assumptions);
+    auto norm_rand = RandomRates (ScenariosCount, market, assumptions); 
     thrust::device_vector<Decimal> norm_rand_device (norm_rand.size ());
     thrust::copy (norm_rand.begin (), norm_rand.end (), norm_rand_device.begin ());
 
