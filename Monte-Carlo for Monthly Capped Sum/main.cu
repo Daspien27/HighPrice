@@ -84,27 +84,26 @@ Decimal growth_rate(Decimal x, Decimal mean, Decimal stddev) {
 struct get_random
 {
     __host__
-    get_random (MarketData const & market)
-    : nrg {std::random_device () ()}
+    get_random (unsigned int seed, MarketData const & market)
+    : rng { seed }
     , nd {market.get_monthly_interest() - market.get_monthly_vol() * market.get_monthly_vol() / 2.0, market.get_monthly_vol()}
     {}
 
-    std::random_device rd;
-    std::mt19937_64 nrg;
-    std::normal_distribution<Decimal> nd;
+    thrust::default_random_engine rng;
+    thrust::normal_distribution<Decimal> nd;
 
     Decimal operator () ()
     {
-        return nd(nrg);
+        return nd(rng);
     }
 };
 
-std::vector<Decimal> RandomRates (size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions)
+std::vector<Decimal> RandomRates (unsigned int seed, size_t ScenariosCount, const MarketData & market, const Assumptions & assumptions)
 {
     std::vector<Decimal> norm_rand;
     norm_rand.reserve (assumptions.term_months * ScenariosCount);
 
-    std::generate_n(std::back_inserter(norm_rand), assumptions.term_months * ScenariosCount, get_random (market));
+    std::generate_n(std::back_inserter(norm_rand), assumptions.term_months * ScenariosCount, get_random (seed, market));
 
     return norm_rand;
 }
@@ -196,20 +195,19 @@ struct rd_thrust {
 		double operator() (const unsigned int n) const {
 		thrust::default_random_engine rng(seed);
 		thrust::normal_distribution<double> dist(interest - volatility * volatility / 2.0, volatility);
-		rng.discard(n * term_months);
+		rng.discard(n);
 		return dist(rng);
 	}
 };
 
-thrust::device_vector<Decimal> device_generate_normrands(const size_t num_scenarios, const int term_months, const Decimal interest, const Decimal volatility)
+thrust::device_vector<Decimal> device_generate_normrands(unsigned int seed, const size_t num_scenarios, const int term_months, const Decimal interest, const Decimal volatility)
 {
 	const unsigned int effective_duration_in_months = num_scenarios * term_months;
 
 	thrust::counting_iterator<unsigned int> index_sequence_begin(0);
 	thrust::device_vector<Decimal> result(effective_duration_in_months);
-	std::random_device rd;
 
-	thrust::transform(index_sequence_begin, index_sequence_begin + effective_duration_in_months, result.begin(), rd_thrust{ interest, volatility,  rd(), term_months });
+	thrust::transform(index_sequence_begin, index_sequence_begin + effective_duration_in_months, result.begin(), rd_thrust{ interest, volatility, seed, term_months });
 
 	return result;
 }
@@ -227,10 +225,13 @@ int main(int argc, char * argv[])
     const MarketData market{ 0.05, 0.1, 1.0 / 12.0, 0.05 };
     const Assumptions assumptions = { 3 * 12 };
 
+    std::random_device rd;
+    const unsigned int seed = rd();
+
     std::vector<Decimal> norm_rand;
-    b.run ("rng host",  [&] () {norm_rand = RandomRates (ScenariosCount, market, assumptions);});
+    b.run ("rng host",  [&] () {norm_rand = RandomRates (seed, ScenariosCount, market, assumptions);});
     thrust::device_vector<Decimal> norm_rand_device;
-    b.run ("rng device",    [&] () {norm_rand_device = random_device_generator::device_generate_normrands (ScenariosCount, assumptions.term_months, market.get_monthly_interest (), market.get_monthly_vol ());});
+    b.run ("rng device",    [&] () {norm_rand_device = random_device_generator::device_generate_normrands (seed, ScenariosCount, assumptions.term_months, market.get_monthly_interest (), market.get_monthly_vol ());});
 
     Decimal avgThrustAlt, avgThrust, avgSTL;
 
