@@ -225,7 +225,7 @@ int main(int argc, char * argv[])
     const size_t ScenariosCount = std::stoi (argv[1]);
 
     const MarketData market{ 0.05, 0.1, 1.0 / 12.0, 0.05 };
-    const Assumptions assumptions = { 3 * 12, 1000.0 };
+    const Assumptions assumptions = { 3 * 12 };
 
     std::vector<Decimal> norm_rand;
     b.run ("rng host",  [&] () {norm_rand = RandomRates (ScenariosCount, market, assumptions);});
